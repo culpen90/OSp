@@ -8,6 +8,8 @@ or operating-system framework.
 The kernel drives the VGA text screen, handles PS/2 keyboard interrupts, and
 keeps time using the PC timer. It includes scrolling, a hardware cursor, line
 editing, screen colors, exception diagnostics, reboot, and halt.
+It also drives an RTL8139 Ethernet adapter and implements its own IPv4
+network stack: ARP, DHCP, ICMP, UDP/DNS, and a small TCP/HTTP client.
 
 ## Build and run
 
@@ -47,6 +49,14 @@ binary, linker map, a 1.44 MiB bootable floppy image, and a JSON manifest with a
 image checksum. `make test` also saves `build/osp-screen.png` and
 `build/test-console.log`. Tool paths can be overridden with `NASM`, `CLANG`,
 `LD_LLD`, and `OBJCOPY` environment variables; Make accepts `QEMU` and `PYTHON`.
+The network tests use a local Ethernet fixture and need no Internet connection.
+To also verify external DNS and fetch a real Internet page:
+
+```sh
+make test-network-live
+```
+
+This saves `build/network-live-console.log` and `build/osp-network-screen.png`.
 
 ## Shell
 
@@ -58,6 +68,12 @@ image checksum. `make test` also saves `build/osp-screen.png` and
 | `echo <text>` | Print text |
 | `color <foreground> <background>` | Set two different colors, each a hex digit `0`–`f` |
 | `uptime` | Show seconds since boot |
+| `net` or `ifconfig` | Show adapter, link, IP configuration, and packet counters |
+| `dhcp` | Obtain a network address from a DHCP server |
+| `ifconfig <ip> <mask> <gateway> <dns>` | Set static IPv4 configuration |
+| `ping <ip or hostname>` | Send an ICMP echo request |
+| `nslookup <hostname>` | Resolve an IPv4 DNS address |
+| `http <http://host[:port]/path>` | Fetch and display a plain HTTP response |
 | `reboot` | Restart the emulated machine |
 | `halt` | Stop the CPU until the machine is restarted |
 
@@ -77,6 +93,58 @@ osp> uptime
 Uptime: 12 seconds.
 ```
 
+## Internet access
+
+`make run` provides an emulated RTL8139 adapter connected to QEMU's user
+network. OSp discovers the PCI device, programs its DMA buffers, and requests
+an IP address automatically at boot. Give DHCP a few seconds, then try:
+
+```text
+osp> net
+osp> ping 10.0.2.2
+osp> nslookup example.com
+osp> http http://example.com/
+```
+
+If automatic configuration fails, `dhcp` retries it. Static configuration is
+also available, for example on the default QEMU network:
+
+```text
+osp> ifconfig 10.0.2.15 255.255.255.0 10.0.2.2 10.0.2.3
+```
+
+All Ethernet and Internet protocol code runs inside OSp, without host socket
+APIs, a host browser, or a host-side HTTP/DNS helper. QEMU still uses the host's
+network connection to transport the virtual NIC's packets. A VM cannot reach
+the physical network without an emulator backend or an assigned physical
+adapter. The default user backend supplies a virtual router, DHCP, DNS
+forwarding, and NAT; external ping may be blocked even when DNS and HTTP work.
+See [QEMU networking](https://www.qemu.org/docs/master/system/devices/net.html).
+
+To connect the guest to a LAN without QEMU's user-mode NAT, use an already
+configured, bridged TAP device on a Linux host:
+
+```sh
+make run NET='tap,model=rtl8139,ifname=tap0,script=no,downscript=no'
+```
+
+That TAP device must already belong to a working network bridge and be
+accessible to QEMU. The LAN's DHCP server supplies the guest's configuration.
+Use `make run NET=none` to boot without an adapter.
+
+The driver uses ordinary PCI configuration and RTL8139 port I/O and DMA. A
+BIOS-compatible x86 PC with a supported RTL8139 adapter is the intended path
+to operating without any host OS. Physical hardware remains unverified;
+modern Ethernet adapters, Wi-Fi, Apple Silicon hardware, and UEFI boot require
+additional drivers or boot support. The current Internet client supports IPv4
+and plain HTTP, with one active request at a time. HTTPS/TLS and IPv6 are not
+implemented.
+
+The TCP client sends each small HTTP request in one segment and does not yet
+negotiate the peer's MSS or implement receive-window flow control. Peers with
+unusually small or closed receive windows can time out. The displayed response
+is limited to 4 KiB, and requests have a bounded connection deadline.
+
 ## Start extending it
 
 - `boot/boot.asm`: the 512-byte boot sector, disk reads, GDT, and protected-mode transition.
@@ -84,9 +152,12 @@ Uptime: 12 seconds.
 - `kernel/interrupts.asm`: exception and IRQ entry points, saved registers, and interrupt return.
 - `kernel/kernel.c`: screen, keyboard, timer, interrupt setup, and command shell.
 - `kernel/kernel.h`: kernel types and entry-point declarations.
+- `kernel/rtl8139.c`: PCI discovery and Ethernet DMA driver.
+- `kernel/network.c`: IP configuration and Internet protocols.
 - `kernel/linker.ld`: physical memory layout.
 - `tools/build.py`: the source-to-image build.
 - `tools/test.py`: automated tests against the running image.
+- `tools/test_network.py`: packet-level network tests against the running image.
 
 Add a command in `execute_command()` in `kernel/kernel.c`, add its description
 to `help`, and run `make test`. See [the architecture guide](docs/architecture.md)
@@ -100,7 +171,8 @@ breakpoint at `kernel_main`, and continue.
 ## Current target and verification
 
 The target is QEMU's BIOS PC machine with a floppy image, VGA text mode, and a
-PS/2 keyboard. Apple Silicon hosts run it through QEMU's x86 CPU emulation.
+PS/2 keyboard and an optional PCI RTL8139 Ethernet adapter. Apple Silicon hosts
+run it through QEMU's x86 CPU emulation.
 BIOS firmware performs the initial disk reads and selects text mode; after the
 protected-mode transition, the kernel handles its own input, output, and
 interrupts. The assembler, compiler, linker, emulator, and BIOS are external
@@ -111,9 +183,13 @@ mode, shell commands, Shift symbols, editing across wrapped lines, input
 bounds, scrolling, timer progress, reboot, halt, and a CPU exception diagnostic.
 It also checks disk loading through the loader's full 64-sector capacity across
 head and cylinder boundaries, using a second VM with 16 MiB RAM.
+The networking suite checks actual Ethernet packets from the guest, including
+DHCP, ARP, ICMP, DNS compression, TCP checksums and retransmission, segmented
+HTTP responses, malformed input, receive-buffer wrapping, timeouts, link
+recovery, and boot without an adapter.
 
 Physical machines and UEFI boot are unverified. The current design has no
-paging, dynamic allocation, filesystem, user processes, or networking. These
+paging, dynamic allocation, filesystem, or user processes. These
 are expansion points rather than hidden dependencies.
 
 Hardware and emulator references:

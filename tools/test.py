@@ -282,10 +282,19 @@ def track_boundary_test(qemu, temporary):
     # A sentinel at the end proves that the loader actually read those sectors.
     sectors = 64
     boot_path = temporary / 'wide-boot.bin'
+    boot_source = temporary / 'wide-boot.asm'
+    # Larger kernel BSS can cover the final disk sector. Preserve the sentinel
+    # before _start zeroes BSS, in unused low memory clear of BIOS/boot storage.
+    address = 0x10000 + sectors * 512 - 4
+    transfer = '    jmp 0x08:0x10000'
+    source = (ROOT / 'boot/boot.asm').read_text()
+    assert source.count(transfer) == 1
+    boot_source.write_text(source.replace(transfer,
+        f'    mov eax, [0x{address:x}]\n    mov [0x9000], eax\n{transfer}'))
     nasm = shutil.which(os.environ.get('NASM', 'nasm'))
     assert nasm, 'nasm is required'
     subprocess.run([nasm, '-f', 'bin', f'-DKERNEL_SECTORS={sectors}',
-                    str(ROOT / 'boot/boot.asm'), '-o', str(boot_path)], check=True)
+                    str(boot_source), '-o', str(boot_path)], check=True)
     kernel = (BUILD / 'kernel.bin').read_bytes()
     payload = kernel + bytes(sectors * 512 - len(kernel) - 4) + b'OSp!'
     image = boot_path.read_bytes() + payload
@@ -297,8 +306,7 @@ def track_boundary_test(qemu, temporary):
     try:
         machine.wait_for('osp> ', timeout=15)
         sentinel = directory / 'sentinel.bin'
-        address = 0x10000 + sectors * 512 - 4
-        machine.monitor(f'pmemsave {address} 4 "{sentinel}"')
+        machine.monitor(f'pmemsave 0x9000 4 "{sentinel}"')
         assert sentinel.read_bytes() == b'OSp!'
         machine.shell('echo trackpass', '\ntrackpass\n')
         print('PASS disk loading across head/cylinder boundaries with 16 MiB RAM', flush=True)

@@ -41,13 +41,17 @@ def build(destination):
         run(nasm, '-f', 'elf32', '-g', '-F', 'dwarf',
             ROOT / 'kernel' / f'{source}.asm', '-o', destination / f'{source}.o')
 
-    run(clang, '--target=i686-none-elf', '-std=c11', '-ffreestanding',
-        '-fno-pic', '-fno-pie', '-fno-stack-protector', '-fno-builtin',
-        '-mno-sse', '-mno-mmx', '-msoft-float', '-Wall', '-Wextra', '-Werror',
-        '-Os', '-g', '-c', ROOT / 'kernel/kernel.c', '-o', destination / 'kernel.o')
+    sources = ['kernel', 'rtl8139', 'network']
+    for source in sources:
+        run(clang, '--target=i686-none-elf', '-std=c11', '-ffreestanding',
+            '-fno-pic', '-fno-pie', '-fno-stack-protector', '-fno-builtin',
+            '-mno-sse', '-mno-mmx', '-msoft-float', '-Wall', '-Wextra', '-Werror',
+            '-Os', '-g', '-c', ROOT / 'kernel' / f'{source}.c',
+            '-o', destination / f'{source}.o')
     run(linker, '-m', 'elf_i386', '-T', ROOT / 'kernel/linker.ld',
         '-Map', destination / 'kernel.map', '-o', destination / 'kernel.elf',
-        destination / 'entry.o', destination / 'interrupts.o', destination / 'kernel.o')
+        destination / 'entry.o', destination / 'interrupts.o',
+        *(destination / f'{source}.o' for source in sources))
     run(objcopy, '-O', 'binary', destination / 'kernel.elf', destination / 'kernel.bin')
 
     kernel = (destination / 'kernel.bin').read_bytes()

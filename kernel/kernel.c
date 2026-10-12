@@ -1,4 +1,5 @@
 #include "kernel.h"
+#include "network.h"
 
 _Static_assert(sizeof(u8) == 1, "u8 must be one byte");
 _Static_assert(sizeof(u16) == 2, "u16 must be two bytes");
@@ -164,6 +165,13 @@ static void console_decimal(u32 value)
     while (count != 0)
         console_character(digits[--count]);
 }
+
+/* The network stack runs in the shell context, with timer/keyboard IRQs active. */
+void net_write(const char *text) { console_write(text); }
+void net_putc(char character) { console_character(character); }
+void net_number(u32 value) { console_decimal(value); }
+u32 net_ticks(void) { return timer_ticks; }
+void net_idle(void) { __asm__ volatile("sti; hlt" : : : "memory"); }
 
 static void console_hex(u32 value)
 {
@@ -402,6 +410,7 @@ void interrupt_dispatch(u32 vector, u32 error)
 static u8 next_character(void)
 {
     for (;;) {
+        network_poll();
         __asm__ volatile("cli" : : : "memory");
         if (queue_tail != queue_head) {
             u8 character = key_queue[queue_tail];
@@ -449,7 +458,7 @@ static int hex_digit(char character)
 static int command_takes_no_arguments(const char *command)
 {
     static const char *const commands[] = {
-        "help", "about", "clear", "uptime", "reboot", "halt"
+        "help", "about", "clear", "uptime", "reboot", "halt", "net", "dhcp"
     };
     for (u32 i = 0; i < sizeof(commands) / sizeof(commands[0]); ++i)
         if (same_text(command, commands[i]))
@@ -512,6 +521,17 @@ static void execute_command(char *line)
         console_character('\n');
     } else if (same_text(command, "color")) {
         command_color(arguments);
+    } else if (same_text(command, "ifconfig")) {
+        if (*arguments)
+            network_configure(arguments);
+        else
+            network_status();
+    } else if (same_text(command, "ping")) {
+        network_ping(arguments);
+    } else if (same_text(command, "nslookup")) {
+        network_dns(arguments);
+    } else if (same_text(command, "http")) {
+        network_http(arguments);
     } else if (*arguments && command_takes_no_arguments(command)) {
         console_write("That command does not take arguments. Type help.\n");
     } else if (same_text(command, "help")) {
@@ -522,12 +542,19 @@ static void execute_command(char *line)
                       "  echo <text>         Print text\n"
                       "  color <fg> <bg>     Set colors, each 0-f\n"
                       "  uptime              Show time since boot\n"
+                      "  net                 Show Ethernet and IP status\n"
+                      "  dhcp                Obtain an address automatically\n"
+                      "  ifconfig <ip> <mask> <gateway> <dns>   Set static IPv4\n"
+                      "  ping <ip or host>   Send an ICMP echo\n"
+                      "  nslookup <host>     Resolve a DNS name\n"
+                      "  http <http://url>   Fetch a plain HTTP page\n"
                       "  reboot              Restart the machine\n"
                       "  halt                Stop the CPU\n"
                       "Editing: Backspace removes a character; Ctrl+U clears a line.\n");
     } else if (same_text(command, "about")) {
         console_write("OSp is an OS starter with an original BIOS bootloader and kernel.\n"
                       "32-bit x86, VGA text console, timer interrupts, and PS/2 keyboard.\n"
+                      "Own RTL8139 Ethernet driver and IPv4 network stack.\n"
                       "The freestanding kernel runs directly on the CPU.\n");
     } else if (same_text(command, "clear")) {
         console_clear();
@@ -536,6 +563,10 @@ static void execute_command(char *line)
         console_write("Uptime: ");
         console_decimal(ticks / TIMER_HZ);
         console_write(" seconds.\n");
+    } else if (same_text(command, "net")) {
+        network_status();
+    } else if (same_text(command, "dhcp")) {
+        network_dhcp();
     } else if (same_text(command, "reboot")) {
         command_reboot();
     } else if (same_text(command, "halt")) {
@@ -558,6 +589,7 @@ void kernel_main(void)
                   "An OS starter built from an original BIOS bootloader and kernel.\n"
                   "Type help to explore the commands.\n\n");
     __asm__ volatile("sti" : : : "memory");
+    network_initialize();
 
     char line[INPUT_LIMIT + 1];
     for (;;) {

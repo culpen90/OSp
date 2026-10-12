@@ -16,7 +16,7 @@
    `kernel_main()` with interrupts disabled. The linker puts this entry point
    at the start of the flat kernel binary.
 6. The C kernel sets up VGA, its interrupt descriptor table, PIC, and PIT,
-   then enables interrupts and enters the shell.
+   then enables interrupts, initializes Ethernet, starts DHCP, and enters the shell.
 
 The loaded kernel is limited to 64 sectors (32 KiB). This keeps disk reads
 within a single 64 KiB DMA window. The build rejects an oversized kernel instead
@@ -94,6 +94,50 @@ is linked. A final link with unresolved runtime helpers fails the build.
 Python prepends the signed 512-byte boot sector and zero-pads the image to
 1,474,560 bytes. The image has no filesystem or partition table. Attach it as a
 floppy drive, as `make run` does.
+
+## Networking
+
+`kernel/rtl8139.c` scans PCI configuration space using ports `0xcf8` and
+`0xcfc` for Realtek vendor `0x10ec`, device `0x8139`. It enables I/O space and
+bus mastering, obtains the I/O BAR, resets the adapter, reads its MAC address,
+and programs static receive and transmit DMA buffers. Addresses are physical
+because paging is disabled. The driver uses the RTL8139's original register
+interface; C+ descriptor mode and other NIC models are unsupported.
+
+The NIC interrupts remain masked. `network_poll()` drains a bounded number of
+frames while the shell waits for keyboard input and while network commands
+wait for replies. The PIT wakes the idle CPU every 10 ms. Protocol work stays
+outside interrupt handlers, so neither network receive parsing nor DNS/HTTP
+output runs inside keyboard or timer IRQs. Buffers are fixed-size BSS storage;
+packet lengths are checked before reading headers or payloads.
+
+`kernel/network.c` builds and parses Ethernet frames, ARP, IPv4, ICMP, UDP,
+DHCP, DNS A records, and TCP. DHCP configuration comes from received packets,
+not assumptions about the emulator's address range. Static configuration is
+available for networks without DHCP. On-link destinations use ARP directly;
+other destinations use the configured gateway. IP and transport checksums,
+protocol lengths, and transaction identities are checked on receive. IPv4
+fragment reassembly is unsupported, so fragmented datagrams are discarded.
+
+The command API supports one operation at a time, with retries and bounded
+deadlines. The TCP client has a small receive window and emits HTTP/1.0 GET
+requests with `Connection: close`. This is a starter Internet client, without
+TLS, a web browser, IPv6, or general-purpose socket/process APIs. See
+[RFC 2131](https://www.rfc-editor.org/rfc/rfc2131) for DHCP and
+[RFC 9293](https://www.rfc-editor.org/rfc/rfc9293) for TCP.
+The client sends its small request as one segment; peer MSS negotiation and
+receive-window flow control are expansion points. Such peers can time out
+rather than complete a request. Response display is capped at 4 KiB.
+
+The kernel never invokes the host's network APIs. QEMU's `-nic` backend
+transports the guest's Ethernet packets and represents the attached network;
+the default user backend also acts as a router and NAT. An existing bridged
+TAP backend connects the same guest driver and stack to a LAN. Actual absence
+of a host OS requires booting on supported physical hardware, which is not
+yet verified. The guest stack is the same in both cases. See
+[QEMU network emulation](https://www.qemu.org/docs/master/system/devices/net.html)
+and the
+[Realtek programming guide](https://www.cs.usfca.edu/~cruse/cs326f04/RTL8139_ProgrammersGuide.pdf).
 
 ## Expansion paths
 
